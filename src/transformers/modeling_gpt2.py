@@ -698,8 +698,11 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
 
     def prepare_inputs_for_generation(self, input_ids, past=None, **kwargs):
         # only last token for inputs_ids if past is defined in kwargs
+        token_type_ids = kwargs.get("token_type_ids", None)
         if past:
             input_ids = input_ids[:, -1].unsqueeze(-1)
+            if token_type_ids is not None:
+                token_type_ids = token_type_ids[:, -1].unsqueeze(-1)
 
         attention_mask = kwargs.get("attention_mask", None)
         position_ids = kwargs.get("position_ids", None)
@@ -718,6 +721,7 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
             "use_cache": kwargs.get("use_cache"),
             "position_ids": position_ids,
             "attention_mask": attention_mask,
+            "token_type_ids": token_type_ids,
         }
 
     @add_start_docstrings_to_callable(GPT2_INPUTS_DOCSTRING)
