@@ -2,11 +2,13 @@ FROM nvidia/cuda:10.2-cudnn7-devel-ubuntu18.04
 LABEL maintainer="Hugging Face"
 LABEL repository="transformers"
 
-RUN apt update && \
-    apt install -y bash \
+RUN apt-get update && \
+    apt-get install -y bash \
                    build-essential \
                    git \
                    curl \
+                   wget \
+                   vim \
                    ca-certificates \
                    locales \
                    python3 \
