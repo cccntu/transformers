@@ -291,7 +291,7 @@ def main():
     column_names = raw_datasets["train"].column_names
     text_column_name = "text" if "text" in column_names else column_names[0]
 
-    def tokenize_function(examples):
+    def tokenize_function(examples, text_column_name=text_column_name):
         return tokenizer(examples[text_column_name])
 
     tokenized_datasets = raw_datasets.map(
