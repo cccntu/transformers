@@ -115,7 +115,7 @@ class BertConfig(PretrainedConfig):
         >>> # Accessing the model configuration
         >>> configuration = model.config
     """
-    model_type = "bert"
+    model_type = "f_bert"
 
     def __init__(
         self,
@@ -135,6 +135,7 @@ class BertConfig(PretrainedConfig):
         gradient_checkpointing=False,
         position_embedding_type="absolute",
         use_cache=True,
+        use_tpu_fourier_optimizations=False,
         **kwargs
     ):
         super().__init__(pad_token_id=pad_token_id, **kwargs)
@@ -154,3 +155,4 @@ class BertConfig(PretrainedConfig):
         self.gradient_checkpointing = gradient_checkpointing
         self.position_embedding_type = position_embedding_type
         self.use_cache = use_cache
+        self.use_tpu_fourier_optimizations = use_tpu_fourier_optimizations
