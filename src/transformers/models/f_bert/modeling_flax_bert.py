@@ -23,7 +23,6 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 import jaxlib.xla_extension as jax_xla
-import ml_collections
 from flax import linen as nn
 from flax.core.frozen_dict import FrozenDict
 from flax.linen.attention import dot_product_attention_weights
