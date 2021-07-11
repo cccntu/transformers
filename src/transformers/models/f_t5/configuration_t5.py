@@ -74,7 +74,7 @@ class T5Config(PretrainedConfig):
         gradient_checkpointing (:obj:`bool`, `optional`, defaults to :obj:`False`):
             If True, use gradient checkpointing to save memory at the expense of slower backward pass.
     """
-    model_type = "t5"
+    model_type = "f_t5"
     keys_to_ignore_at_inference = ["past_key_values"]
 
     def __init__(
@@ -96,6 +96,8 @@ class T5Config(PretrainedConfig):
         pad_token_id=0,
         eos_token_id=1,
         gradient_checkpointing=False,
+        use_tpu_fourier_optimizations=False,
+        max_seq_length = 512,
         **kwargs
     ):
         super().__init__(
@@ -120,6 +122,8 @@ class T5Config(PretrainedConfig):
         self.feed_forward_proj = feed_forward_proj
         self.use_cache = use_cache
         self.gradient_checkpointing = gradient_checkpointing
+        self.use_tpu_fourier_optimizations = use_tpu_fourier_optimizations
+        self.max_seq_length = max_seq_length
 
     @property
     def hidden_size(self):

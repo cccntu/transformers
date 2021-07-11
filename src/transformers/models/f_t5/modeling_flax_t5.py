@@ -15,14 +15,18 @@
 """ Flax T5 model. """
 
 
+import math
 import copy
-from typing import Callable, Optional, Tuple
+import functools
+from typing import Any, Callable, Iterable, Optional, Tuple
 
 import numpy as np
+from scipy import linalg
 
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
+from jax import lax, random
 from flax.core.frozen_dict import FrozenDict, unfreeze
 from flax.linen import combine_masks, make_causal_mask
 from flax.linen.attention import dot_product_attention_weights
@@ -58,6 +62,155 @@ def shift_tokens_right(input_ids: jnp.ndarray, pad_token_id: int, decoder_start_
 
     return shifted_input_ids
 
+"""Fourier Transforms used by FNet."""
+
+
+def two_dim_matmul(x, matrix_dim_one, matrix_dim_two, precision=lax.Precision.DEFAULT):
+    """
+    Applies 2D matrix multiplication to 2D input arrays.
+    Args:
+    x: Input of shape [MAX_SEQ_LEN, HIDDEN_DIM]
+    matrix_dim_one: [MAX_SEQ_LEN, MAX_SEQ_LEN] matrix to apply to first
+      (sequence) dimension of input.
+    matrix_dim_two: [HIDDEN_DIM, HIDDEN_DIM] matrix to apply to second (hidden)
+      dimension of input.
+    precision: XLA precision for matrix multiplication operation.
+    Returns:
+    [MAX_SEQ_LEN, HIDDEN_DIM] array resulting from application of two consecutive matrix multiplications.
+    """
+    return _two_dim_matmul(x, matrix_dim_one, matrix_dim_two, precision)
+
+
+@functools.partial(jax.jit, static_argnums=3)
+def _two_dim_matmul(x, matrix_dim_one, matrix_dim_two, precision):
+    """Applies 2D matrix multiplication to 2D input arrays."""
+    return jnp.einsum(
+        "ij,jk,ni->nk",
+        x,
+        matrix_dim_two,
+        matrix_dim_one,
+        optimize=True,
+        precision=precision,
+    )
+
+
+@jax.jit
+def fftn(x):
+    """
+    Applies n-dimensional Fast Fourier Transform (FFT) to input array. This function reproduces the JAX native
+    n-dimensional FFT, jax.numpy.fftn. For the special case of 2D FFTs, we have found that applying 1D FFTs is faster,
+    on TPUs, than applying the native JAX implementation. TODO(b/181607810): Revisit optimization as XLA FFT
+    implementation improves.
+    Args:
+    x: Input n-dimensional array.
+    Returns:
+    n-dimensional Fourier transform of input n-dimensional array.
+    """
+    out = x
+    for axis in reversed(range(x.ndim)):
+        out = jnp.fft.fft(out, axis=axis)
+    return out
+
+
+class FourierTransform(nn.Module):
+    """
+    Fourier Transform layer. Applies 2D Fourier transform over final two dimensions of inputs - typically the sequence
+    and hidden dimensions.
+    Attributes:
+    fourier_transform: Discrete multi-dimensional Fourier Transform function.
+    """
+
+    fourier_transform: Callable[[jnp.ndarray], jnp.ndarray]
+
+    @nn.compact
+    def __call__(self, inputs, padding_mask=None, deterministic=False):
+        """
+        Applies FourierTransform module.
+        Args:
+          inputs: Batch of input embeddings of shape
+            <float>[BATCH_SIZE, MAX_SEQ_LENGTH, HIDDEN_DIM].
+          padding_mask: Ignored. Mask only used by self-attention sublayers.
+          deterministic: Ignored. Whether or not to apply dropout to input.
+        Returns:
+          Real part of discrete Fourier transform of inputs with shape <float>[BATCH_SIZE, MAX_SEQ_LENGTH, HIDDEN_DIM].
+        """
+        del padding_mask  # Only used by self-attention sublayer.
+        del deterministic  # Fourier Transform is always deterministic.
+        return jax.vmap(self.fourier_transform)(inputs).real
+
+
+# modified from FlaxBertSelfAttention @ https://github.com/huggingface/transformers/blob/master/src/transformers/models/bert/modeling_flax_bert.py
+# and https://github.com/google-research/google-research/blob/56f2bd33ec02f1973aa501d21dd954a51ebaa020/f_net/layers.py#L86
+# and https://github.com/google-research/google-research/blob/master/f_net/models.py
+class FlaxFT5FourierTransform(nn.Module):
+    """
+    Fourier Transform layer. Applies 2D Fourier transform over final two dimensions of inputs - typically the sequence
+    and hidden dimensions.
+    Attributes:
+    fourier_transform: Discrete multi-dimensional Fourier Transform function.
+    """
+
+    config: T5Config
+    dtype: jnp.dtype = jnp.float32  # the dtype of the computation
+
+    def setup(self):
+        if not self.config.use_tpu_fourier_optimizations:
+            self.fourier_transform = jnp.fft.fftn
+        elif self.config.max_seq_length <= 4096:
+            dft_mat_hidden = linalg.dft(self.config.d_model)
+            dft_mat_seq = linalg.dft(self.config.max_seq_length)
+
+            self.fourier_transform = functools.partial(
+                two_dim_matmul,
+                matrix_dim_one=jnp.asarray(dft_mat_seq),
+                matrix_dim_two=jnp.asarray(dft_mat_hidden),
+                precision=lax.Precision.DEFAULT,
+            )
+        elif not math.log2(self.config.max_seq_length).is_integer():
+            raise ValueError(
+                "For large input sequence lengths (>4096), the maximum input "
+                "sequence length must be a power of 2 to take advantage of FFT "
+                "optimizations. We encourage the same for the model hidden "
+                "dimension. config.max_seq_length: %d. config.d_model: $d" % self.config.max_seq_length,
+                self.config.d_model,
+            )
+        else:
+            # TODO(b/181607810): If d_model is short, we can use a mix of DFT matrix
+            #  for hidden dimension and FFT for sequence dimension.
+            # Use customized FFT on TPUs; see also fourier.fftn docstring.
+            self.fourier_transform = fftn
+
+        self.mixing_sublayer = FourierTransform(fourier_transform=self.fourier_transform)
+
+    #           name=f"fourier_transform_{layer}")
+
+    def __call__(
+        self,
+        hidden_states,
+        attention_mask=None,
+        key_value_states=None,
+        position_bias=None,
+        use_cache=False,
+        output_attentions=False,
+        deterministic=True,
+        init_cache=False,
+     ):
+        output = self.mixing_sublayer(
+            inputs=hidden_states,
+            padding_mask=attention_mask,
+            deterministic=deterministic,
+        )
+        position_bias = None
+        attn_weights = None
+        outputs = (output, position_bias)
+
+        if output_attentions:
+            outputs = outputs + (attn_weights,)
+
+        return outputs
+
+        outputs = (output, None) if output_attentions else (output,)
+        return outputs
 
 class FlaxT5LayerNorm(nn.Module):
     hidden_size: int
@@ -458,12 +611,18 @@ class FlaxT5LayerSelfAttention(nn.Module):
     dtype: jnp.dtype = jnp.float32  # the dtype of the computation
 
     def setup(self):
-        self.SelfAttention = FlaxT5Attention(
-            self.config,
-            has_relative_attention_bias=self.has_relative_attention_bias,
-            causal=self.config.causal,
-            dtype=self.dtype,
-        )
+        if self.config.causal:
+            self.SelfAttention = FlaxT5Attention(
+                self.config,
+                has_relative_attention_bias=self.has_relative_attention_bias,
+                causal=self.config.causal,
+                dtype=self.dtype,
+            )
+        else:
+            self.SelfAttention = FlaxFT5FourierTransform(
+                self.config,
+                dtype=self.dtype,
+            )
         self.layer_norm = FlaxT5LayerNorm(self.config.d_model, eps=self.config.layer_norm_epsilon, dtype=self.dtype)
         self.dropout = nn.Dropout(self.config.dropout_rate)
 
