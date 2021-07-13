@@ -138,6 +138,12 @@ class FourierTransform(nn.Module):
         del deterministic  # Fourier Transform is always deterministic.
         return jax.vmap(self.fourier_transform)(inputs).real
 
+# from https://github.com/sooheon/perceiver-jax/blob/master/perceiver_jax/perceiver_jax.py
+class ReZero(nn.Module):
+    @nn.compact
+    def __call__(self, x):
+        scale = self.param("scale", jax.nn.initializers.zeros, (1,))
+        return scale * x
 
 # modified from FlaxBertSelfAttention @ https://github.com/huggingface/transformers/blob/master/src/transformers/models/bert/modeling_flax_bert.py
 # and https://github.com/google-research/google-research/blob/56f2bd33ec02f1973aa501d21dd954a51ebaa020/f_net/layers.py#L86
@@ -314,13 +320,15 @@ class FlaxT5LayerFF(nn.Module):
                 f"{self.config.feed_forward_proj} is not supported. Choose between `relu` and `gated-gelu`"
             )
 
-        self.layer_norm = FlaxT5LayerNorm(self.config.d_model, eps=self.config.layer_norm_epsilon, dtype=self.dtype)
+        #self.layer_norm = FlaxT5LayerNorm(self.config.d_model, eps=self.config.layer_norm_epsilon, dtype=self.dtype)
+        self.rezero = ReZero()
         self.dropout = nn.Dropout(self.config.dropout_rate)
 
     def __call__(self, hidden_states, deterministic=True):
-        forwarded_states = self.layer_norm(hidden_states)
+        #forwarded_states = self.layer_norm(hidden_states)
+        forwarded_states = hidden_states
         forwarded_states = self.DenseReluDense(forwarded_states, deterministic=deterministic)
-        hidden_states = hidden_states + self.dropout(forwarded_states, deterministic=deterministic)
+        hidden_states = hidden_states + self.rezero(self.dropout(forwarded_states, deterministic=deterministic))
         return hidden_states
 
 
@@ -623,7 +631,8 @@ class FlaxT5LayerSelfAttention(nn.Module):
                 self.config,
                 dtype=self.dtype,
             )
-        self.layer_norm = FlaxT5LayerNorm(self.config.d_model, eps=self.config.layer_norm_epsilon, dtype=self.dtype)
+        #self.layer_norm = FlaxT5LayerNorm(self.config.d_model, eps=self.config.layer_norm_epsilon, dtype=self.dtype)
+        self.rezero = ReZero()
         self.dropout = nn.Dropout(self.config.dropout_rate)
 
     def __call__(
@@ -635,7 +644,8 @@ class FlaxT5LayerSelfAttention(nn.Module):
         deterministic=True,
         init_cache=False,
     ):
-        normed_hidden_states = self.layer_norm(hidden_states)
+        #normed_hidden_states = self.layer_norm(hidden_states)
+        normed_hidden_states = hidden_states
         attention_output = self.SelfAttention(
             normed_hidden_states,
             attention_mask=attention_mask,
@@ -644,7 +654,7 @@ class FlaxT5LayerSelfAttention(nn.Module):
             deterministic=deterministic,
             init_cache=init_cache,
         )
-        hidden_states = hidden_states + self.dropout(attention_output[0], deterministic=deterministic)
+        hidden_states = hidden_states + self.rezero(self.dropout(attention_output[0], deterministic=deterministic))
         outputs = (hidden_states,) + attention_output[1:]  # add attentions if we output them
         return outputs
 
@@ -654,7 +664,8 @@ class FlaxT5LayerCrossAttention(nn.Module):
 
     def setup(self):
         self.EncDecAttention = FlaxT5Attention(self.config, has_relative_attention_bias=False, causal=False)
-        self.layer_norm = FlaxT5LayerNorm(self.config.d_model, eps=self.config.layer_norm_epsilon)
+        #self.layer_norm = FlaxT5LayerNorm(self.config.d_model, eps=self.config.layer_norm_epsilon)
+        self.rezero = ReZero()
         self.dropout = nn.Dropout(self.config.dropout_rate)
 
     def __call__(
@@ -666,7 +677,8 @@ class FlaxT5LayerCrossAttention(nn.Module):
         output_attentions=False,
         deterministic=True,
     ):
-        normed_hidden_states = self.layer_norm(hidden_states)
+        #normed_hidden_states = self.layer_norm(hidden_states)
+        normed_hidden_states = hidden_states
         attention_output = self.EncDecAttention(
             normed_hidden_states,
             attention_mask=attention_mask,
@@ -674,7 +686,7 @@ class FlaxT5LayerCrossAttention(nn.Module):
             position_bias=position_bias,
             output_attentions=output_attentions,
         )
-        hidden_states = hidden_states + self.dropout(attention_output[0], deterministic=deterministic)
+        hidden_states = hidden_states + self.rezero(self.dropout(attention_output[0], deterministic=deterministic))
         outputs = (hidden_states,) + attention_output[1:]  # add attentions if we output them
         return outputs
 
